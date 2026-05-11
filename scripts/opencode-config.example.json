@@ -1,0 +1,10 @@
+{
+  "mode": "managed",
+  "url": "http://127.0.0.1:4096",
+  "password": null,
+  "username": "opencode",
+  "port": 4096,
+  "hostname": "127.0.0.1",
+  "default_provider": "deepseek",
+  "default_model": "deepseek-v4-pro"
+}
