@@ -2,18 +2,6 @@
 
 An OpenCode plugin that pushes a message to a QQ chat via [AstrBot](https://github.com/Soulter/AstrBot) when an OpenCode session completes (fires on `session.idle`). Uses AstrBot's cron API to schedule an immediate one-shot message.
 
-## Limitations
-
-The cron-based approach has two structural issues:
-
-1. **No autonomous action.** The cron job simulates a user message (e.g. "output last task result"), waits for the cron session's AI to fill the response, then returns that as a bot reply. This notifies the **human user** visually in QQ, but the **LLM client** driving OpenCode cannot act on it — there is no callback path back to the AI. Since `session.idle` itself already requires user interaction to continue, this is a minor issue in practice, but it means the plugin is purely a notification, not an automation trigger.
-
-2. **Isolated cron session.** The cron job runs in a *separate* AstrBot session, with no visibility into the OpenCode conversation context. It can only report "session XYZ ('title') completed" — not the summary, not the diffs, not any state the AI might need to continue work. Because of limitation #1, this is moot.
-
-**In short:** this plugin tells the user *that* a task finished, but cannot feed the result back to the AI. It is a pragmatic stopgap for QQ-based workflows where the user needs to know when to check back.
-
-**TODO:** Find a notification channel that allows the AI to receive and act on `session.idle` events directly, without relying on simulated user/AI messages in a separate session.
-
 1. AstrBot running and accessible (default `http://10.19.76.1:6185`)
 2. AstrBot account credentials (username + password)
 3. QQ adapter configured in AstrBot
@@ -122,8 +110,12 @@ export const AstrbotNotify = async ({ client }) => {
     event: async ({ event }) => {
       if (event.type !== "session.idle") return
 
-      const sessionId = event.session?.id ?? "unknown"
-      const sessionTitle = event.session?.title ?? "untitled"
+      const sessionID = event.properties?.sessionID ?? "unknown"
+      let sessionTitle = "untitled"
+      try {
+        const session = await client.session.get({ path: { id: sessionID } })
+        sessionTitle = session.data?.title || "untitled"
+      } catch (_) { /* fallback */ }
 
       try {
         const token = await getToken(BASE_URL, USERNAME, PASSWORD)
@@ -132,7 +124,7 @@ export const AstrbotNotify = async ({ client }) => {
           run_once: true,
           name: "opencode task done",
           note: [
-            `OpenCode session \`${sessionId}\``,
+            `OpenCode session \`${sessionID}\``,
             `"${sessionTitle}"`,
             `completed.`
           ].join(" "),
@@ -206,7 +198,7 @@ Fire a trivial task and watch the QQ chat:
 
 ```bash
 SID=$(python scripts/main.py fire "Say hello and exit.")
-python scripts/main.py wait $SID
+# Session will run async; notification arrives when done
 ```
 
 AstrBot should send a message to the QQ chat when the session completes. Check logs:

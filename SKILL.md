@@ -55,11 +55,25 @@ python scripts/main.py status
 
 In managed mode, the first command auto-spawns the server if it's not running. In external mode, it checks connectivity to the provided URL.
 
+### 1.3 Pre-authorize permissions
+
+**IMPORTANT — READ THIS:** OpenCode sessions will halt and wait indefinitely when the AI requests a permission (read external files, execute certain commands, access directories outside the project, etc.). Permissions are **file-config only** — they cannot be changed via the HTTP API at runtime. If `opencode serve` is started without `"permission": "allow"` in its config file, there is no way to fix this from the CLI.
+
+Before launching `opencode serve`, ensure `opencode.json` contains:
+
+```json
+{
+  "permission": "allow"
+}
+```
+
+The script will warn on startup if permissions are not detected. If you cannot tolerate this limitation, **do not use this skill**.
+
 ## 2. Task Execution
 
 All commands take optional `--dir` / `-d` to target a project directory.
 
-**Guidance:** Use `fire` (async) for anything non-trivial. Reserve `ask` (sync) for trivial one-line queries. The most proactive approach: install a notification plugin (see 2.3) so OpenCode *pushes* completion events to the LLM, avoiding blocking on `wait` entirely.
+**Guidance:** Use `fire` (async) for anything non-trivial. Reserve `ask` (sync) for trivial one-line queries. The most proactive approach: install a notification plugin (see 2.2) so OpenCode *pushes* completion events to the LLM. If a notification plugin is not viable, poll with `check` until the session status becomes `idle`. Use `--sid` to continue an existing session without creating a new one.
 
 ### 2.1 One-shot query (blocking — trivial tasks only)
 
@@ -67,32 +81,13 @@ All commands take optional `--dir` / `-d` to target a project directory.
 python scripts/main.py ask "What does git status do?"
 python scripts/main.py ask "..." --agent plan
 python scripts/main.py ask "Review the schema" --dir /home/user/other-project
+# Continue an existing session:
+python scripts/main.py ask "What about adding tests?" --sid ses_123
 ```
 
-### 2.2 Async fire + wait (practical default)
+### 2.2 Notification plugin (most proactive — preferred approach)
 
-For any task involving code changes, file creation, refactoring, or multi-step reasoning — fire asynchronously, then wait:
-
-```bash
-# Fire and get session ID
-SID=$(python scripts/main.py fire "Refactor the auth module to use JWT")
-# => prints session ID to stdout
-
-# Wait until done (blocks, prints result)
-python scripts/main.py wait $SID
-
-# Or check progress without blocking
-python scripts/main.py check $SID
-# => Status: running
-#    Tasks: 2/5 completed, 1 in progress
-#      Current: Refactor auth middleware
-```
-
-Note: `wait` blocks the LLM's tool call. If the task is very long and the LLM client times out tool calls, prefer the notification approach below, or fall back to periodic `check` calls.
-
-### 2.3 Notification plugin (most proactive — when LLM client supports it)
-
-Rather than blocking on `wait`, install a plugin that hooks `session.idle` and pushes a notification to the LLM. The LLM fires a task, continues other work, and receives a callback when OpenCode finishes.
+Rather than polling with `check`, install a plugin that hooks `session.idle` and pushes a notification. The LLM fires a task and continues other work, receiving a callback when OpenCode finishes.
 
 Template (adapt `NOTIFY_FN` body to the LLM client's available notification channel):
 
@@ -124,8 +119,12 @@ export const NotifySessionIdle = async ({ client }) => {
   return {
     event: async ({ event }) => {
       if (event.type !== "session.idle") return
-      const sessionId = event.session?.id ?? "unknown"
-      const sessionTitle = event.session?.title ?? "untitled"
+      const sessionId = event.properties?.sessionID ?? "unknown"
+      let sessionTitle = "untitled"
+      try {
+        const session = await client.session.get({ path: { id: sessionId } })
+        sessionTitle = session.data?.title || "untitled"
+      } catch (_) { /* fallback to "untitled" */ }
       try {
         await NOTIFY_FN(sessionId, sessionTitle)
         await client.app.log({
@@ -155,7 +154,7 @@ python scripts/main.py conversation $SID
 
 For a complete AstrBot + QQ notification implementation (login → token → cron), see `references/astrbot-notify.md`.
 
-### 2.4 Session management
+### 2.3 Session management
 
 ```bash
 python scripts/main.py session list
@@ -182,7 +181,8 @@ python scripts/main.py read path/to/file --dir /other-project
 ```bash
 python scripts/main.py config              # GET /config
 python scripts/main.py config-set '{"model":"anthropic/claude-sonnet-4-5"}'
-python scripts/main.py providers           # List providers with status
+python scripts/main.py providers           # List connected providers
+python scripts/main.py providers --filter deepseek  # Filter by name
 python scripts/main.py agents              # List agents
 python scripts/main.py mcp-status          # MCP server status
 python scripts/main.py mcp-add my-server '{"type":"remote","url":"https://..."}'
@@ -253,7 +253,7 @@ In managed mode, every command calls `main.py` checks if the server is alive bef
 ## 7. Complete Command Reference
 
 **Task execution:**
-`ask` `fire` `wait` `check` `todo` `diffs` `conversation`
+`ask` `fire` `check` `todo` `diffs` `conversation <id> [--limit/-l <n>] [--offset/-o <n>]`
 
 **Session:**
 `session list` `session get <id>` `session delete <id>` `session fork <id>` `session abort <id>`
@@ -262,12 +262,22 @@ In managed mode, every command calls `main.py` checks if the server is alive bef
 `read <path>` `ls [path]` `find "<pat>"` `find-file "<name>"` `find-symbol "<name>"`
 
 **Config:**
-`config` `config-set <json>` `providers` `agents` `mcp-status` `mcp-add <name> <json>`
+`config` `config-set <json>` `providers [--filter/-f <str>]` `agents` `mcp-status` `mcp-add <name> <json>`
 
 **Server:**
 `status` `restart`
 
-All commands accept `--dir` / `-d` for multi-project targeting. `ask` and `fire` additionally accept `--model` / `-m` and `--agent` / `-a`.
+All commands accept `--dir` / `-d` for multi-project targeting. `ask` and `fire` additionally accept `--model` / `-m`, `--agent` / `-a`, and `--sid` to continue an existing session.
+
+---
+
+## 8. Known Limitations
+
+These are upstream opencode serve behaviours that `main.py` cannot fully resolve:
+
+- **`conversation` content folded.** Tool calls and reasoning are represented as `[tool]` / `[reasoning]` markers; the raw content is not exposed via the HTTP API. Use `--limit/-l` to scope the output.
+- **`config` shows limited info.** The `/config` endpoint does not reflect runtime model/provider/credential state (stored in the database). Use `providers` to list connected providers instead.
+- **Permission requests halt sessions.** There is no way to approve permission prompts via the CLI. Always run `config-set` (see 1.3) to pre-authorize before dispatching tasks.
 
 ---
 

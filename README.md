@@ -6,7 +6,7 @@ An [OpenCode](https://opencode.ai) agent skill that teaches an LLM how to use Op
 
 Wraps every `opencode serve` HTTP operation into a single Python script (`scripts/main.py`), so the LLM never needs to handcraft curl calls. Covers:
 
-- **Task execution** — `ask` (sync), `fire` + `wait` (async), `check` (progress peek)
+- **Task execution** — `ask` (sync), `fire` (async), `check` (progress peek), `--sid` session reuse
 - **Session management** — list, get, delete, fork, abort
 - **File operations** — read, list directory, grep, fuzzy file/symbol search
 - **Runtime config** — read/update config, list providers/agents, add MCP servers dynamically
@@ -41,13 +41,21 @@ cp scripts/opencode-config.example.json scripts/opencode-config.json
 # 2. Verify
 python scripts/main.py status
 
-# 3. Ask a question
+# 3. **IMPORTANT** — Sessions WILL hang on permission requests.
+# Permissions are FILE-CONFIG ONLY. Add this to opencode.json before starting serve:
+#
+#   "permission": "allow"
+#
+# Without this, external_directory access and other guarded operations
+# will cause sessions to hang indefinitely. If you cannot accept this,
+# do NOT use this skill.
+
+# 4. Ask a question
 python scripts/main.py ask "Explain the auth flow"
 
-# 4. Fire a long task asynchronously
+# 5. Fire a long task asynchronously
 SID=$(python scripts/main.py fire "Refactor the auth module")
 python scripts/main.py check $SID
-python scripts/main.py wait $SID
 ```
 
 ## Install

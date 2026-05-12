@@ -8,7 +8,6 @@ In managed mode, transparently spawns and maintains the server process.
 Usage:
   python main.py ask "<prompt>" [--model p/m] [--agent a] [--dir d]
   python main.py fire "<prompt>" [--model p/m] [--agent a] [--dir d]
-  python main.py wait <session-id> [--timeout s]
   python main.py check <session-id>
   python main.py todo <session-id>
   python main.py diffs <session-id>
@@ -54,6 +53,7 @@ except ImportError:
 SCRIPT_DIR = Path(__file__).resolve().parent
 CONFIG_PATH = SCRIPT_DIR / "opencode-config.json"
 PID_FILE = SCRIPT_DIR / ".opencode-server.pid"
+_PRE_AUTH_DONE = False
 
 # ── config ──────────────────────────────────────────────────────────────
 
@@ -240,12 +240,35 @@ def spawn_server(cfg):
 
 def ensure_running(cfg):
     if is_running(cfg):
+        _pre_auth(cfg)
         return
     if cfg["mode"] == "external":
         print(f"Error: OpenCode server not reachable at {cfg['url']}")
         print("Make sure 'opencode serve' is running, or switch to managed mode.")
         sys.exit(1)
     spawn_server(cfg)
+    _pre_auth(cfg)
+
+
+def _pre_auth(cfg):
+    """Warn if server is not pre-authorized (permissions are file-config only)."""
+    global _PRE_AUTH_DONE
+    if _PRE_AUTH_DONE:
+        return
+    _PRE_AUTH_DONE = True
+    try:
+        r = requests.get(f"{cfg['url']}/config", headers=base_headers(cfg), timeout=5)
+        cfg_data = r.json()
+        perm = cfg_data.get("permission", {})
+        if isinstance(perm, str) and perm == "allow":
+            return
+        if isinstance(perm, dict) and perm.get("*") == "allow":
+            return
+        print("WARNING: Permissions not set to full allow. Sessions may hang on permission requests.")
+        print("Add '\"permission\": \"allow\"' to opencode.json and restart opencode serve.")
+        print("Continuing anyway — expect issues with external_directory or other guarded actions.\n")
+    except Exception:
+        pass
 
 
 def restart_server(cfg):
@@ -303,6 +326,21 @@ def http_delete(cfg, path, **kwargs):
     return r.json()
 
 
+def http_patch(cfg, path, body=None, **kwargs):
+    ensure_running(cfg)
+    h = base_headers(cfg)
+    d = kwargs.pop("directory", None)
+    if d:
+        h["x-opencode-directory"] = d
+    r = requests.patch(f"{cfg['url']}{path}", headers=h,
+                       data=json.dumps(body) if body else None,
+                       timeout=kwargs.pop("timeout", 30), **kwargs)
+    r.raise_for_status()
+    if r.status_code == 204:
+        return None
+    return r.json()
+
+
 # ── helpers ──────────────────────────────────────────────────────────────
 
 def parse_model(model_str):
@@ -337,12 +375,26 @@ def fmt_json(obj):
     return json.dumps(obj, indent=2, ensure_ascii=False)
 
 
+def _fmt_age(seconds):
+    if seconds < 0:
+        return "0s"
+    if seconds < 60:
+        return f"{int(seconds)}s"
+    mins = int(seconds / 60)
+    if mins < 60:
+        return f"{mins}m"
+    hours = mins / 60
+    if hours < 24:
+        return f"{hours:.1f}h"
+    return f"{hours / 24:.1f}d"
+
+
 def resolve_session_status(statuses, sid):
     s = statuses.get(sid)
     if isinstance(s, str):
         return s
     if isinstance(s, dict):
-        return s.get("status", "unknown")
+        return s.get("type", "unknown")
     return "unknown"
 
 
@@ -358,13 +410,16 @@ def cmd_status(cfg):
         sys.exit(1)
 
 
-def cmd_ask(cfg, prompt, model_str=None, agent=None, directory=None):
+def cmd_ask(cfg, prompt, model_str=None, agent=None, directory=None, sid=None):
     m = resolve_model(cfg, model_str)
-    session = http_post(cfg, "/session", {"title": prompt[:80]}, directory=directory)
-    sid = session["id"]
+    if sid:
+        target_sid = sid
+    else:
+        session = http_post(cfg, "/session", {"title": prompt[:80]}, directory=directory)
+        target_sid = session["id"]
     body = build_message_body(prompt, m, agent)
     try:
-        resp = http_post(cfg, f"/session/{sid}/message", body, directory=directory, timeout=600)
+        resp = http_post(cfg, f"/session/{target_sid}/message", body, directory=directory, timeout=600)
     except Exception as e:
         print(f"Error: {e}")
         sys.exit(1)
@@ -373,46 +428,51 @@ def cmd_ask(cfg, prompt, model_str=None, agent=None, directory=None):
     for part in parts:
         if part.get("type") == "text":
             print(part.get("text", ""))
-        else:
-            print(fmt_json(part))
 
 
-def cmd_fire(cfg, prompt, model_str=None, agent=None, directory=None):
+def cmd_fire(cfg, prompt, model_str=None, agent=None, directory=None, sid=None):
     m = resolve_model(cfg, model_str)
-    session = http_post(cfg, "/session", {"title": prompt[:80]}, directory=directory)
-    sid = session["id"]
+    if sid:
+        target_sid = sid
+    else:
+        session = http_post(cfg, "/session", {"title": prompt[:80]}, directory=directory)
+        target_sid = session["id"]
     body = build_message_body(prompt, m, agent)
-    http_post(cfg, f"/session/{sid}/prompt_async", body, directory=directory)
-    print(sid)
+    http_post(cfg, f"/session/{target_sid}/prompt_async", body, directory=directory)
+    print(target_sid)
 
 
-def cmd_wait(cfg, session_id, timeout_seconds=600):
-    deadline = time.time() + timeout_seconds
-    interval = 3
-    while time.time() < deadline:
-        statuses = http_get(cfg, "/session/status")
-        status = resolve_session_status(statuses, session_id)
-        if status in ("idle", "completed"):
-            msgs = http_get(cfg, f"/session/{session_id}/message", params={"limit": "1"})
-            if msgs and isinstance(msgs, list) and len(msgs) > 0:
-                parts = msgs[-1].get("parts", [])
-                for part in parts:
-                    if part.get("type") == "text":
-                        print(part.get("text", ""))
-            return
-        if status == "error":
-            print(f"Session {session_id} ended with error.")
-            sys.exit(1)
-        time.sleep(interval)
-    print(f"Timeout: session still running after {timeout_seconds}s.")
-    print(f"Use 'check {session_id}' to see progress.")
 
 
 def cmd_check(cfg, session_id):
-    statuses = http_get(cfg, "/session/status")
-    status = resolve_session_status(statuses, session_id)
-    print(f"Status: {status}")
+    # session info
+    try:
+        info = http_get(cfg, f"/session/{session_id}")
+        title = info.get("title") or info.get("slug") or session_id[:12]
+        agent = info.get("agent", "?")
+        model = info.get("model", {})
+        model_id = model.get("id", "?") if isinstance(model, dict) else str(model)
+        t = info.get("time", {})
+        created = t.get("created", 0)
+        updated = t.get("updated", 0)
+        now = time.time() * 1000
+        age = (now - created) / 1000
+        last = (now - updated) / 1000
+        print(f"Title: {title}")
+        print(f"Agent: {agent}  |  Model: {model_id}")
+        print(f"Created: {_fmt_age(age)} ago  |  Updated: {_fmt_age(last)} ago")
+    except Exception:
+        print(f"Session: {session_id}")
 
+    # status
+    try:
+        statuses = http_get(cfg, "/session/status")
+        status = resolve_session_status(statuses, session_id)
+        print(f"Status: {status}")
+    except Exception:
+        pass
+
+    # todo
     try:
         todos = http_get(cfg, f"/session/{session_id}/todo")
         if todos and isinstance(todos, list) and len(todos) > 0:
@@ -425,6 +485,7 @@ def cmd_check(cfg, session_id):
     except Exception:
         pass
 
+    # diffs
     try:
         diffs = http_get(cfg, f"/session/{session_id}/diff")
         if diffs and isinstance(diffs, list) and len(diffs) > 0:
@@ -443,9 +504,21 @@ def cmd_diffs(cfg, session_id):
     print(fmt_json(diffs))
 
 
-def cmd_conversation(cfg, session_id):
+def cmd_conversation(cfg, session_id, limit=None, offset=0):
     msgs = http_get(cfg, f"/session/{session_id}/message")
-    for msg in (msgs or []):
+    total = len(msgs) if msgs else 0
+
+    if not msgs:
+        print("(empty)")
+        return
+
+    if limit is None:
+        limit = 20
+
+    end_idx = min(offset + limit, total)
+    shown_msgs = msgs[offset:end_idx]
+
+    for msg in shown_msgs:
         info = msg.get("info", {})
         role = info.get("role", "?")
         parts = msg.get("parts", [])
@@ -457,6 +530,10 @@ def cmd_conversation(cfg, session_id):
                 print(f"[{part.get('type')}]")
         print()
 
+    if total > end_idx or offset > 0:
+        print(f"[{len(shown_msgs)} messages shown (range {offset+1}-{end_idx} of {total}). "
+              f"Use --limit/-l and --offset/-o for more]")
+
 
 def cmd_session_list(cfg, directory=None):
     sessions = http_get(cfg, "/session", directory=directory)
@@ -464,11 +541,18 @@ def cmd_session_list(cfg, directory=None):
         print("No sessions.")
         return
     statuses = http_get(cfg, "/session/status", directory=directory)
+    now_ms = time.time() * 1000
     for s in sessions:
         sid = s.get("id", "?")
-        title = s.get("title", "(untitled)")
+        title = s.get("title") or s.get("slug") or sid[:12]
         status = resolve_session_status(statuses, sid)
-        print(f"[{status}] {title}  {sid}")
+        agent = s.get("agent", "?")
+        model = s.get("model", {})
+        model_id = model.get("id", "?") if isinstance(model, dict) else str(model)
+        t = s.get("time", {})
+        updated = t.get("updated", 0)
+        last = (now_ms - updated) / 1000 if updated else 0
+        print(f"[{status}] {title}  {sid}  {agent}  {model_id}  {_fmt_age(last)}")
 
 
 def cmd_session_get(cfg, session_id, directory=None):
@@ -539,13 +623,56 @@ def cmd_config(cfg, directory=None):
 
 def cmd_config_set(cfg, json_str, directory=None):
     data = json.loads(json_str)
-    http_post(cfg, "/config", body=data, directory=directory)
+    http_patch(cfg, "/config", body=data, directory=directory)
     print("Config updated.")
 
 
-def cmd_providers(cfg, directory=None):
+def cmd_providers(cfg, directory=None, filter_str=None):
     p = http_get(cfg, "/provider", directory=directory)
-    print(fmt_json(p))
+    all_providers = p.get("all", []) if isinstance(p, dict) else p
+    connected = p.get("connected", []) if isinstance(p, dict) else []
+
+    if not isinstance(all_providers, list) or not isinstance(connected, list):
+        print(fmt_json(p))
+        return
+
+    by_id = {pr["id"]: pr for pr in all_providers if isinstance(pr, dict) and "id" in pr}
+
+    result = []
+    for cid in connected:
+        if isinstance(cid, str) and cid in by_id:
+            result.append(by_id[cid])
+        elif isinstance(cid, dict):
+            result.append(cid)
+
+    if not result:
+        print("No connected providers found.")
+        return
+
+    if filter_str:
+        lower = filter_str.lower()
+        result = [pr for pr in result
+                  if lower in (pr.get("id", "") + pr.get("name", "")).lower()]
+        if not result:
+            print(f"No providers matching '{filter_str}'.")
+            return
+
+    for pr in result:
+        pid = pr.get("id") or pr.get("name", "?")
+        print(f"[{pid}]")
+        models = pr.get("models", [])
+        if isinstance(models, dict):
+            models = list(models.values())
+        if isinstance(models, list) and len(models) > 0:
+            for m in models:
+                if isinstance(m, dict):
+                    mid = m.get("id") or m.get("name", "?")
+                    print(f"  - {mid}")
+                else:
+                    print(f"  - {m}")
+        else:
+            print("  (no models listed)")
+        print()
 
 
 def cmd_agents(cfg, directory=None):
@@ -578,6 +705,7 @@ def main():
     p.add_argument("prompt", help="Prompt text")
     p.add_argument("--model", "-m", help="Model as provider/model (e.g. anthropic/claude-sonnet-4-5)")
     p.add_argument("--agent", "-a", help="Agent name (e.g. build, plan)")
+    p.add_argument("--sid", help="Send to existing session instead of creating new")
     p.add_argument("--dir", "-d", help="Target project directory")
 
     # fire
@@ -585,12 +713,8 @@ def main():
     p.add_argument("prompt")
     p.add_argument("--model", "-m")
     p.add_argument("--agent", "-a")
+    p.add_argument("--sid", help="Send to existing session instead of creating new")
     p.add_argument("--dir", "-d")
-
-    # wait
-    p = sub.add_parser("wait", help="Wait for a session to finish, print result")
-    p.add_argument("session_id")
-    p.add_argument("--timeout", "-t", type=int, default=600, help="Max seconds to wait")
 
     # check
     p = sub.add_parser("check", help="Quick status of a session")
@@ -605,8 +729,10 @@ def main():
     p.add_argument("session_id")
 
     # conversation
-    p = sub.add_parser("conversation", help="Get full conversation history")
+    p = sub.add_parser("conversation", help="Get conversation history")
     p.add_argument("session_id")
+    p.add_argument("--limit", "-l", type=int, help="Max messages to show (default: 20)")
+    p.add_argument("--offset", "-o", type=int, default=0, help="Skip first N messages")
 
     # session
     p = sub.add_parser("session", help="Session management")
@@ -662,7 +788,8 @@ def main():
     p.add_argument("--dir", "-d")
 
     # providers
-    p = sub.add_parser("providers", help="List providers")
+    p = sub.add_parser("providers", help="List connected providers")
+    p.add_argument("--filter", "-f", help="Filter by provider ID or name")
     p.add_argument("--dir", "-d")
 
     # agents
@@ -699,11 +826,9 @@ def main():
         elif args.command == "restart":
             restart_server(cfg)
         elif args.command == "ask":
-            cmd_ask(cfg, args.prompt, args.model, args.agent, args.dir)
+            cmd_ask(cfg, args.prompt, args.model, args.agent, args.dir, args.sid)
         elif args.command == "fire":
-            cmd_fire(cfg, args.prompt, args.model, args.agent, args.dir)
-        elif args.command == "wait":
-            cmd_wait(cfg, args.session_id, args.timeout)
+            cmd_fire(cfg, args.prompt, args.model, args.agent, args.dir, args.sid)
         elif args.command == "check":
             cmd_check(cfg, args.session_id)
         elif args.command == "todo":
@@ -711,7 +836,7 @@ def main():
         elif args.command == "diffs":
             cmd_diffs(cfg, args.session_id)
         elif args.command == "conversation":
-            cmd_conversation(cfg, args.session_id)
+            cmd_conversation(cfg, args.session_id, args.limit, args.offset)
         elif args.command == "session":
             if args.session_cmd == "list":
                 cmd_session_list(cfg, args.dir)
@@ -741,7 +866,7 @@ def main():
         elif args.command == "config-set":
             cmd_config_set(cfg, args.json_str, args.dir)
         elif args.command == "providers":
-            cmd_providers(cfg, args.dir)
+            cmd_providers(cfg, args.dir, args.filter)
         elif args.command == "agents":
             cmd_agents(cfg, args.dir)
         elif args.command == "mcp-status":
