@@ -53,7 +53,6 @@ except ImportError:
 SCRIPT_DIR = Path(__file__).resolve().parent
 CONFIG_PATH = SCRIPT_DIR / "opencode-config.json"
 PID_FILE = SCRIPT_DIR / ".opencode-server.pid"
-_PRE_AUTH_DONE = False
 
 # ── config ──────────────────────────────────────────────────────────────
 
@@ -240,35 +239,12 @@ def spawn_server(cfg):
 
 def ensure_running(cfg):
     if is_running(cfg):
-        _pre_auth(cfg)
         return
     if cfg["mode"] == "external":
         print(f"Error: OpenCode server not reachable at {cfg['url']}")
         print("Make sure 'opencode serve' is running, or switch to managed mode.")
         sys.exit(1)
     spawn_server(cfg)
-    _pre_auth(cfg)
-
-
-def _pre_auth(cfg):
-    """Warn if server is not pre-authorized (permissions are file-config only)."""
-    global _PRE_AUTH_DONE
-    if _PRE_AUTH_DONE:
-        return
-    _PRE_AUTH_DONE = True
-    try:
-        r = requests.get(f"{cfg['url']}/config", headers=base_headers(cfg), timeout=5)
-        cfg_data = r.json()
-        perm = cfg_data.get("permission", {})
-        if isinstance(perm, str) and perm == "allow":
-            return
-        if isinstance(perm, dict) and perm.get("*") == "allow":
-            return
-        print("WARNING: Permissions not set to full allow. Sessions may hang on permission requests.")
-        print("Add '\"permission\": \"allow\"' to opencode.json and restart opencode serve.")
-        print("Continuing anyway — expect issues with external_directory or other guarded actions.\n")
-    except Exception:
-        pass
 
 
 def restart_server(cfg):
