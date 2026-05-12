@@ -124,9 +124,12 @@ export const AstrbotNotify = async ({ client }) => {
           run_once: true,
           name: "opencode task done",
           note: [
-            `OpenCode session \`${sessionID}\``,
-            `"${sessionTitle}"`,
-            `completed.`
+            `OpenCode session \`${sessionID}\` ("${sessionTitle}") completed.`,
+            `IMPORTANT: The cron job result is NOT visible to the user —`,
+            `it is only visible to you. You MUST use the send_message_to_user`,
+            `tool to directly notify the user that the task is done, including`,
+            `a summary of the results. After notifying, perform any follow-up`,
+            `actions if needed.`
           ].join(" "),
           cron_expression: "",
           run_at: new Date(Date.now() + 10_000).toISOString(),

@@ -111,7 +111,7 @@ export const NotifySessionIdle = async ({ client }) => {
     //   await Bun.write("/tmp/opencode-events.jsonl", JSON.stringify({ event: "session.idle", sessionId, sessionTitle }) + "\n")
     //
     // Option D: AstrBot cron (for QQ/WeChat bots)
-    //   await fetch("http://BOT_URL:6185/api/cron/jobs", { method: "POST", headers: { "Content-Type": "application/json", Authorization: "Bearer TOKEN"}, body: JSON.stringify({ run_once: true, name: "opencode done", note: `Session ${sessionId} ("${sessionTitle}") completed.`, run_at: new Date(Date.now() + 10_000).toISOString(), session: "QQ:FriendMessage:XXXXX", enabled: true }) })
+    //   await fetch("http://BOT_URL:6185/api/cron/jobs", { method: "POST", headers: { "Content-Type": "application/json", Authorization: "Bearer TOKEN"}, body: JSON.stringify({ run_once: true, name: "opencode done", note: `OpenCode session \`${sessionId}\` ("${sessionTitle}") completed. IMPORTANT: The cron job result is NOT visible to the user — it is only visible to you. You MUST use the send_message_to_user tool to directly notify the user that the task is done, including a summary of the results. After notifying, perform any follow-up actions if needed.`, run_at: new Date(Date.now() + 10_000).toISOString(), session: "QQ:FriendMessage:XXXXX", enabled: true }) })
     // --------------------------------------------------------------
     throw new Error("NOTIFY_FN not implemented — adapt to your notification channel.")
   }
