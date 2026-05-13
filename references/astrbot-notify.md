@@ -33,7 +33,7 @@ Single HTTP call, no login round-trip, no cron scheduling.
 
 ## Plugin Code
 
-Place at `~/.config/opencode/plugins/astrbot-notify.js` (global) or `.opencode/plugins/astrbot-notify.js` (project).
+Place at `~/.config/opencode/plugins/astrbot-notify.js`.
 
 ```javascript
 // astrbot-notify.js — OpenCode → AstrBot → QQ notification plugin
