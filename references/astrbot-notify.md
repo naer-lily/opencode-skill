@@ -1,11 +1,19 @@
 # AstrBot Notification Plugin
 
-An OpenCode plugin that pushes a message to a QQ chat via [AstrBot](https://github.com/Soulter/AstrBot) when an OpenCode session completes (fires on `session.idle`). Uses AstrBot's cron API to schedule an immediate one-shot message.
+An OpenCode plugin that pushes a message to a QQ chat via [AstrBot](https://github.com/Soulter/AstrBot) when an OpenCode session completes (fires on `session.idle`).
 
-1. AstrBot running and accessible (default `http://10.19.76.1:6185`)
-2. AstrBot account credentials (username + password)
-3. QQ adapter configured in AstrBot
-4. The target QQ chat's `SESSION_ID` — obtained by typing `/sid` in the QQ chat and reading the `UMO` field from the bot's reply.
+Uses the [external_trigger](https://github.com/naer-lily/astrbot_plugin_external_trigger) AstrBot plugin — a single webhook call injects a message directly into the target conversation, no cron scheduling or JWT login needed.
+
+## Prerequisites
+
+1. AstrBot running with `astrbot_plugin_external_trigger` installed and enabled
+   ```bash
+   cd /AstrBot/data/plugins
+   git clone https://github.com/naer-lily/astrbot_plugin_external_trigger
+   # Enable in dashboard
+   ```
+2. AstrBot API key — get from dashboard: Settings → API Token
+3. The target QQ chat's `UMO` — send `/sid` in the chat, copy the `UMO` value
 
 ## How It Works
 
@@ -13,16 +21,15 @@ An OpenCode plugin that pushes a message to a QQ chat via [AstrBot](https://gith
 OpenCode session.idle
        │
        ▼
-Plugin fetches AstrBot login token (POST /api/auth/login)
+Plugin POSTs to AstrBot webhook (POST /api/v1/plug/hook/external-event)
+  Authorization: Bearer <API_KEY>
+  Body: { umo: "QQ:FriendMessage:XXXX", message: "..." }
        │
        ▼
-Plugin schedules a one-shot cron job (POST /api/cron/jobs)
-       │
-       ▼
-AstrBot sends "session completed" message to the QQ chat
+AstrBot injects the message into the target chat → LLM replies directly
 ```
 
-The password is sent as a 32-char lowercase MD5 hash. The login token is cached in memory until expiry.
+Single HTTP call, no login round-trip, no cron scheduling.
 
 ## Plugin Code
 
@@ -31,72 +38,29 @@ Place at `~/.config/opencode/plugins/astrbot-notify.js` (global) or `.opencode/p
 ```javascript
 // astrbot-notify.js — OpenCode → AstrBot → QQ notification plugin
 //
-// Config: set these environment variables before starting opencode serve.
+// Requires astrbot_plugin_external_trigger installed on AstrBot.
+//
+// Env vars:
 //   ASTRBOT_URL      — AstrBot base URL (default: http://10.19.76.1:6185)
-//   ASTRBOT_USERNAME — AstrBot username
-//   ASTRBOT_PASSWORD — AstrBot password (plaintext; MD5 computed internally)
-//   ASTRBOT_SESSION  — QQ session ID (get via /sid in QQ chat, use UMO field)
+//   ASTRBOT_API_KEY  — AstrBot API token (from dashboard)
+//   ASTRBOT_SESSION  — QQ session UMO (get via /sid in QQ chat)
 //
 // If env vars are not set, the plugin does nothing (graceful no-op).
-
-const crypto = await import("node:crypto")
-
-function md5hex(s) {
-  return crypto.createHash("md5").update(s, "utf8").digest("hex").toLowerCase()
-}
-
-// ── In-memory token cache ────────────────────────────────────────────
-
-let cachedToken = null
-let tokenExpiry = 0
-
-async function getToken(baseUrl, username, password) {
-  if (cachedToken && Date.now() < tokenExpiry - 60_000) {
-    return cachedToken
-  }
-
-  const res = await fetch(`${baseUrl}/api/auth/login`, {
-    method: "POST",
-    headers: { "Content-Type": "application/json" },
-    body: JSON.stringify({
-      username: username,
-      password: md5hex(password),
-    }),
-  })
-
-  if (!res.ok) {
-    throw new Error(`AstrBot login failed: ${res.status}`)
-  }
-
-  const json = await res.json()
-  if (json.status !== "ok" || !json.data?.token) {
-    throw new Error(`AstrBot login unexpected response: ${JSON.stringify(json)}`)
-  }
-
-  cachedToken = json.data.token
-  // JWT exp claim is in seconds since epoch
-  const payload = JSON.parse(Buffer.from(cachedToken.split(".")[1], "base64url").toString())
-  tokenExpiry = (payload.exp ?? 0) * 1000
-
-  return cachedToken
-}
 
 // ── Plugin entry ─────────────────────────────────────────────────────
 
 export const AstrbotNotify = async ({ client }) => {
 
   const BASE_URL  = process.env.ASTRBOT_URL ?? "http://10.19.76.1:6185"
-  const USERNAME  = process.env.ASTRBOT_USERNAME
-  const PASSWORD  = process.env.ASTRBOT_PASSWORD
+  const API_KEY   = process.env.ASTRBOT_API_KEY
   const SESSION   = process.env.ASTRBOT_SESSION
 
-  // Graceful no-op if not configured
-  if (!USERNAME || !PASSWORD || !SESSION) {
+  if (!API_KEY || !SESSION) {
     await client.app.log({
       body: {
         service: "astrbot-notify", level: "warn",
         message: "AstrBot notify plugin loaded but not configured. " +
-                 "Set ASTRBOT_USERNAME, ASTRBOT_PASSWORD, and ASTRBOT_SESSION."
+                 "Set ASTRBOT_API_KEY and ASTRBOT_SESSION."
       }
     })
     return {}
@@ -117,41 +81,34 @@ export const AstrbotNotify = async ({ client }) => {
         sessionTitle = session.data?.title || "untitled"
       } catch (_) { /* fallback */ }
 
+      const message = [
+        `OpenCode session \`${sessionID}\` ("${sessionTitle}") completed.`,
+        `IMPORTANT: The webhook result is NOT visible to the user —`,
+        `it is only visible to you. You MUST use the send_message_to_user`,
+        `tool to directly notify the user that the task is done, including`,
+        `a summary of the results. After notifying, perform any follow-up`,
+        `actions if needed.`,
+      ].join(" ")
+
       try {
-        const token = await getToken(BASE_URL, USERNAME, PASSWORD)
-
-        const jobBody = {
-          run_once: true,
-          name: "opencode task done",
-          note: [
-            `OpenCode session \`${sessionID}\` ("${sessionTitle}") completed.`,
-            `IMPORTANT: The cron job result is NOT visible to the user —`,
-            `it is only visible to you. You MUST use the send_message_to_user`,
-            `tool to directly notify the user that the task is done, including`,
-            `a summary of the results. After notifying, perform any follow-up`,
-            `actions if needed.`
-          ].join(" "),
-          cron_expression: "",
-          run_at: new Date(Date.now() + 10_000).toISOString(),
-          session: SESSION,
-          enabled: true,
-        }
-
-        const res = await fetch(`${BASE_URL}/api/cron/jobs`, {
-          method: "POST",
-          headers: {
-            "Content-Type": "application/json",
-            "Authorization": `Bearer ${token}`,
+        const res = await fetch(
+          `${BASE_URL}/api/v1/plug/hook/external-event`,
+          {
+            method: "POST",
+            headers: {
+              "Content-Type": "application/json",
+              "Authorization": `Bearer ${API_KEY}`,
+            },
+            body: JSON.stringify({ umo: SESSION, message }),
           },
-          body: JSON.stringify(jobBody),
-        })
+        )
 
         const body = await res.text()
         await client.app.log({
           body: {
             service: "astrbot-notify",
             level: res.ok ? "info" : "error",
-            message: `AstrBot cron job: HTTP ${res.status} — ${body.slice(0, 200)}`,
+            message: `AstrBot webhook: HTTP ${res.status} — ${body.slice(0, 200)}`,
           }
         })
       } catch (err) {
@@ -170,9 +127,27 @@ export const AstrbotNotify = async ({ client }) => {
 
 ## Setup Steps
 
-### 1. Get the QQ session ID
+### 1. Install the external_trigger plugin on AstrBot
 
-In the target QQ chat window, send:
+```bash
+cd /AstrBot/data/plugins
+git clone https://github.com/naer-lily/astrbot_plugin_external_trigger
+```
+
+Enable it in the AstrBot dashboard. The startup log should show:
+
+```
+[external_trigger] JWT endpoint ready: POST /api/plug/hook/external-event
+[external_trigger] API-key endpoint ready: POST /api/v1/plug/hook/external-event
+```
+
+### 2. Get the API key
+
+Dashboard → Settings → API Token. Copy the token.
+
+### 3. Get the QQ session UMO
+
+In the target QQ chat, send:
 
 ```
 /sid
@@ -180,16 +155,15 @@ In the target QQ chat window, send:
 
 The bot replies with a message containing `UMO: XXXXXXXXXXXXXXXX`. That string is the `ASTRBOT_SESSION`.
 
-### 2. Set environment variables
+### 4. Set environment variables
 
 ```bash
 export ASTRBOT_URL="http://10.19.76.1:6185"
-export ASTRBOT_USERNAME="astrbot"
-export ASTRBOT_PASSWORD="your-plaintext-password"
+export ASTRBOT_API_KEY="your-api-token"
 export ASTRBOT_SESSION="QQ:FriendMessage:XXXXXXXX"
 ```
 
-### 3. Restart opencode serve
+### 5. Restart opencode serve
 
 ```bash
 python scripts/main.py restart
@@ -201,12 +175,7 @@ Fire a trivial task and watch the QQ chat:
 
 ```bash
 SID=$(python scripts/main.py fire "Say hello and exit.")
-# Session will run async; notification arrives when done
+# Notification arrives in QQ when session completes
 ```
 
-AstrBot should send a message to the QQ chat when the session completes. Check logs:
-
-```bash
-# In the opencode serve terminal output, look for:
-# [astrbot-notify] AstrBot cron job: HTTP 200 — ...
-```
+Check the OpenCode serve logs for the plugin log lines.

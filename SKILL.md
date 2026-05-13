@@ -110,8 +110,8 @@ export const NotifySessionIdle = async ({ client }) => {
     // Option C: Write to a file the LLM is watching
     //   await Bun.write("/tmp/opencode-events.jsonl", JSON.stringify({ event: "session.idle", sessionId, sessionTitle }) + "\n")
     //
-    // Option D: AstrBot cron (for QQ/WeChat bots)
-    //   await fetch("http://BOT_URL:6185/api/cron/jobs", { method: "POST", headers: { "Content-Type": "application/json", Authorization: "Bearer TOKEN"}, body: JSON.stringify({ run_once: true, name: "opencode done", note: `OpenCode session \`${sessionId}\` ("${sessionTitle}") completed. IMPORTANT: The cron job result is NOT visible to the user — it is only visible to you. You MUST use the send_message_to_user tool to directly notify the user that the task is done, including a summary of the results. After notifying, perform any follow-up actions if needed.`, run_at: new Date(Date.now() + 10_000).toISOString(), session: "QQ:FriendMessage:XXXXX", enabled: true }) })
+    // Option D: AstrBot webhook (for QQ/WeChat bots)
+    //   await fetch("http://BOT_URL:6185/api/v1/plug/hook/external-event", { method: "POST", headers: { "Content-Type": "application/json", Authorization: "Bearer API_KEY"}, body: JSON.stringify({ umo: "QQ:FriendMessage:XXXXX", message: `OpenCode session \`${sessionId}\` ("${sessionTitle}") completed.` }) })
     // --------------------------------------------------------------
     throw new Error("NOTIFY_FN not implemented — adapt to your notification channel.")
   }
@@ -152,7 +152,7 @@ python scripts/main.py diffs $SID
 python scripts/main.py conversation $SID
 ```
 
-For a complete AstrBot + QQ notification implementation (login → token → cron), see `references/astrbot-notify.md`.
+For a complete AstrBot + QQ notification implementation (webhook via external_trigger plugin), see `references/astrbot-notify.md`.
 
 ### 2.3 Session management
 
