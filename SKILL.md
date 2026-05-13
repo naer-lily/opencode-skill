@@ -111,7 +111,7 @@ export const NotifySessionIdle = async ({ client }) => {
     //   await Bun.write("/tmp/opencode-events.jsonl", JSON.stringify({ event: "session.idle", sessionId, sessionTitle }) + "\n")
     //
     // Option D: AstrBot webhook (for QQ/WeChat bots)
-    //   await fetch("http://BOT_URL:6185/api/v1/plug/hook/external-event", { method: "POST", headers: { "Content-Type": "application/json", Authorization: "Bearer API_KEY"}, body: JSON.stringify({ umo: "QQ:FriendMessage:XXXXX", message: `OpenCode session \`${sessionId}\` ("${sessionTitle}") completed.` }) })
+    //   await fetch("http://BOT_URL:6185/api/v1/plug/hook/external-event", { method: "POST", headers: { "Content-Type": "application/json", Authorization: "Bearer API_KEY"}, body: JSON.stringify({ umo: "QQ:FriendMessage:XXXXX", message: `<external_event>\n<content>OpenCode session \`${sessionId}\` ("${sessionTitle}") completed.</content>\n<remark>This message is automatically sent by the system. The user cannot see it. You MUST notify the user that this event occurred, then perform any appropriate follow-up actions.</remark>\n</external_event>` }) })
     // --------------------------------------------------------------
     throw new Error("NOTIFY_FN not implemented — adapt to your notification channel.")
   }

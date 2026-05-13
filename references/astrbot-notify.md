@@ -82,13 +82,11 @@ export const AstrbotNotify = async ({ client }) => {
       } catch (_) { /* fallback */ }
 
       const message = [
-        `OpenCode session \`${sessionID}\` ("${sessionTitle}") completed.`,
-        `IMPORTANT: The webhook result is NOT visible to the user —`,
-        `it is only visible to you. You MUST use the send_message_to_user`,
-        `tool to directly notify the user that the task is done, including`,
-        `a summary of the results. After notifying, perform any follow-up`,
-        `actions if needed.`,
-      ].join(" ")
+        `<external_event>`,
+        `<content>OpenCode session \`${sessionID}\` ("${sessionTitle}") completed.</content>`,
+        `<remark>This message is automatically sent by the system. The user cannot see it. You MUST notify the user that this event occurred, then perform any appropriate follow-up actions.</remark>`,
+        `</external_event>`,
+      ].join("\n")
 
       try {
         const res = await fetch(
