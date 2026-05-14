@@ -76,10 +76,20 @@ export const AstrbotNotify = async ({ client }) => {
 
       const sessionID = event.properties?.sessionID ?? "unknown"
       let sessionTitle = "untitled"
+      let isParent = false
       try {
         const session = await client.session.get({ path: { id: sessionID } })
         sessionTitle = session.data?.title || "untitled"
+        isParent = !session.data?.parentID
       } catch (_) { /* fallback */ }
+
+      if (!isParent) {
+        await client.app.log({
+          body: { service: "astrbot-notify", level: "debug",
+                  message: `Skipped child session ${sessionID} idle.` }
+        })
+        return
+      }
 
       const message = [
         `<external_event>`,

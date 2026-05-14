@@ -124,6 +124,7 @@ export const NotifySessionIdle = async ({ client }) => {
       try {
         const session = await client.session.get({ path: { id: sessionId } })
         sessionTitle = session.data?.title || "untitled"
+        if (session.data?.parentID) return  // skip sub-agent sessions
       } catch (_) { /* fallback to "untitled" */ }
       try {
         await NOTIFY_FN(sessionId, sessionTitle)
