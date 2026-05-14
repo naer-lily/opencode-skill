@@ -80,7 +80,7 @@ export const AstrbotNotify = async ({ client }) => {
       try {
         const session = await client.session.get({ path: { id: sessionID } })
         sessionTitle = session.data?.title || "untitled"
-        isParent = !session.data?.parentID
+        isParent = !session.parentID
       } catch (_) { /* fallback */ }
 
       if (!isParent) {
